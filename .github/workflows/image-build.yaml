@@ -53,10 +53,18 @@ on:
         required: false
         default: ""
       extra-tags:
-        description: Newline separated additional tags.
+        description: Comma separated literal tags to publish in addition to the defaults.
         type: string
         required: false
         default: ""
+      publish-base-digest:
+        description: >
+          Also tag the image with "<base-tag>-<base-digest>" resolved from the
+          Dockerfile's first FROM line. Used by the base image itself so
+          downstream repos can pin a specific Alpine snapshot.
+        type: boolean
+        required: false
+        default: false
       provenance:
         description: Emit a build provenance attestation.
         type: boolean
@@ -124,6 +132,45 @@ jobs:
           IMAGE: local/${{ steps.vars.outputs.name }}:ci
         run: ${{ inputs.test-command }}
 
+      - name: Resolve extra tags
+        id: extra
+        run: |
+          set -euo pipefail
+          OUT="$(mktemp)"
+
+          if [ -n "${{ inputs.extra-tags }}" ]; then
+            IFS=',' read -ra PARTS <<< "${{ inputs.extra-tags }}"
+            for TAG in "${PARTS[@]}"; do
+              TAG="$(echo "$TAG" | xargs)"
+              if [ -n "$TAG" ]; then printf 'type=raw,value=%s\n' "$TAG" >> "$OUT"; fi
+            done
+          fi
+
+          if [ "${{ inputs.publish-base-digest }}" = "true" ]; then
+            BASE_REF="$(awk 'tolower($1)=="from"{print $2; exit}' '${{ inputs.dockerfile }}')"
+            if [ -z "${BASE_REF}" ]; then
+              echo "::error::Could not read a FROM line from ${{ inputs.dockerfile }}"
+              exit 1
+            fi
+            BASE_TAG="${BASE_REF##*:}"
+            case "${BASE_TAG}" in */*) BASE_TAG="${BASE_REF##*/}" ;; esac
+            DIGEST="$(docker buildx imagetools inspect "${BASE_REF}" | awk '/^Digest:/{print $2; exit}')"
+            if [ -z "${DIGEST}" ]; then
+              echo "::error::Could not resolve digest for ${BASE_REF}"
+              exit 1
+            fi
+            SHORT="${DIGEST#sha256:}"
+            SHORT="${SHORT:0:12}"
+            printf 'type=raw,value=%s-%s\n' "${BASE_TAG}" "${SHORT}" >> "$OUT"
+            echo "Base ${BASE_REF} resolves to ${DIGEST}"
+          fi
+
+          {
+            echo "tags<<IMAGE_BUILD_EXTRA_TAGS_EOF"
+            cat "$OUT"
+            echo "IMAGE_BUILD_EXTRA_TAGS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Log in to ${{ inputs.registry }}
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
@@ -146,7 +193,7 @@ jobs:
             type=semver,pattern={{major}}
             type=ref,event=branch
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
-            ${{ inputs.extra-tags }}
+            ${{ steps.extra.outputs.tags }}
 
       - name: Build and push
         if: github.event_name != 'pull_request'
@@ -181,4 +228,10 @@ jobs:
             echo "| --- | --- |"
             echo "| digest | \`${{ steps.push.outputs.digest }}\` |"
             echo "| build date | \`${{ steps.vars.outputs.build_date }}\` |"
+            echo
+            echo "**Tags**"
+            echo
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
