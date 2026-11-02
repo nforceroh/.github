@@ -1,0 +1,184 @@
+name: image-build
+
+# Reusable image build/publish workflow for the homelab container image repos.
+#
+# Callers look like:
+#
+#   jobs:
+#     image:
+#       uses: nforceroh/.github/.github/workflows/image-build.yaml@v1
+#       permissions: { contents: read, packages: write, attestations: write, id-token: write }
+#
+# The caller must grant `packages: write` (plus `attestations`/`id-token` for
+# provenance) — a called workflow cannot elevate the token it receives.
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: Image name. Defaults to the caller's repository name.
+        type: string
+        required: false
+        default: ""
+      context:
+        description: Build context path.
+        type: string
+        required: false
+        default: "."
+      dockerfile:
+        description: Dockerfile path, relative to the repository root.
+        type: string
+        required: false
+        default: "Dockerfile"
+      test-command:
+        description: >
+          Command run after a local build to smoke test the image. Receives the
+          locally built image reference in IMAGE. Set to empty to skip.
+        type: string
+        required: false
+        default: './tests/run_tests.sh "$IMAGE"'
+      platforms:
+        description: Target platforms for the published image.
+        type: string
+        required: false
+        default: "linux/amd64"
+      registry:
+        description: Container registry host.
+        type: string
+        required: false
+        default: "ghcr.io"
+      registry-owner:
+        description: Registry namespace. Defaults to the calling repository owner.
+        type: string
+        required: false
+        default: ""
+      extra-tags:
+        description: Newline separated additional tags.
+        type: string
+        required: false
+        default: ""
+      provenance:
+        description: Emit a build provenance attestation.
+        type: boolean
+        required: false
+        default: true
+
+jobs:
+  build:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve image metadata
+        id: vars
+        run: |
+          set -euo pipefail
+
+          NAME="${{ inputs.image-name }}"
+          if [ -z "$NAME" ]; then NAME="${GITHUB_REPOSITORY##*/}"; fi
+
+          OWNER="${{ inputs.registry-owner }}"
+          if [ -z "$OWNER" ]; then OWNER="${GITHUB_REPOSITORY_OWNER}"; fi
+
+          BUILD_DATE="$(date -u +'%Y%m%d%H%M%S')"
+
+          {
+            echo "name=${NAME}"
+            echo "base=${{ inputs.registry }}/${OWNER}/${NAME}"
+            echo "build_date=${BUILD_DATE}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Resolved image: ${{ inputs.registry }}/${OWNER}/${NAME}"
+
+      - name: Set up QEMU
+        if: contains(inputs.platforms, ',')
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build local image for testing
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          load: true
+          push: false
+          tags: local/${{ steps.vars.outputs.name }}:ci
+          build-args: |
+            BUILD_DATE=${{ steps.vars.outputs.build_date }}
+            VERSION=${{ steps.vars.outputs.build_date }}
+
+      - name: Smoke test
+        if: inputs.test-command != ''
+        env:
+          IMAGE: local/${{ steps.vars.outputs.name }}:ci
+        run: ${{ inputs.test-command }}
+
+      - name: Log in to ${{ inputs.registry }}
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ inputs.registry }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels)
+        if: github.event_name != 'pull_request'
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.vars.outputs.base }}
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=raw,value=${{ steps.vars.outputs.build_date }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=ref,event=branch
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
+            ${{ inputs.extra-tags }}
+
+      - name: Build and push
+        if: github.event_name != 'pull_request'
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          platforms: ${{ inputs.platforms }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BUILD_DATE=${{ steps.vars.outputs.build_date }}
+            VERSION=${{ steps.vars.outputs.build_date }}
+
+      - name: Attest build provenance
+        if: inputs.provenance && github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ steps.vars.outputs.base }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Summary
+        if: github.event_name != 'pull_request'
+        run: |
+          {
+            echo "### Published \`${{ steps.vars.outputs.base }}\`"
+            echo
+            echo "| field | value |"
+            echo "| --- | --- |"
+            echo "| digest | \`${{ steps.push.outputs.digest }}\` |"
+            echo "| build date | \`${{ steps.vars.outputs.build_date }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

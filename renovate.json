@@ -1,0 +1,31 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Shared Renovate preset for the nforceroh homelab container images. Consume with \"extends\": [\"github>nforceroh/.github\"].",
+  "extends": ["config:recommended", "docker:pinDigests", ":semanticCommits"],
+  "timezone": "America/New_York",
+  "schedule": ["before 6am on monday"],
+  "packageRules": [
+    {
+      "description": "Track the shared Alpine/s6 base image in FROM lines",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["ghcr.io/nforceroh/alpine-base"],
+      "groupName": "alpine-base",
+      "labels": ["base-image"],
+      "automerge": false
+    },
+    {
+      "description": "Track the nginx-php intermediate base image",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["ghcr.io/nforceroh/nginx-php"],
+      "groupName": "nginx-php",
+      "labels": ["base-image"],
+      "automerge": false
+    },
+    {
+      "description": "Group GitHub Actions bumps, but keep them pinned to digests",
+      "matchManagers": ["github-actions"],
+      "groupName": "github-actions",
+      "pinDigests": true
+    }
+  ]
+}

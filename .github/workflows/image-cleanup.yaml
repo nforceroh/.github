@@ -1,0 +1,69 @@
+name: image-cleanup
+
+# Reusable GHCR pruning workflow, replacing the per-repo ghcr_cleanup.yaml copies.
+#
+# Callers look like:
+#
+#   jobs:
+#     prune:
+#       uses: nforceroh/.github/.github/workflows/image-cleanup.yaml@v1
+#       permissions: { contents: read, packages: write }
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: Package name. Defaults to the caller's repository name.
+        type: string
+        required: false
+        default: ""
+      min-versions-to-keep:
+        description: Number of most recent versions to retain.
+        type: number
+        required: false
+        default: 10
+      delete-only-untagged:
+        description: Only delete untagged versions.
+        type: boolean
+        required: false
+        default: true
+      dry-run:
+        description: Log what would be deleted without deleting anything.
+        type: boolean
+        required: false
+        default: false
+
+jobs:
+  prune:
+    name: Prune old image versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Resolve package name
+        id: vars
+        run: |
+          set -euo pipefail
+          NAME="${{ inputs.image-name }}"
+          if [ -z "$NAME" ]; then NAME="${GITHUB_REPOSITORY##*/}"; fi
+          echo "package=${NAME}" >> "$GITHUB_OUTPUT"
+          echo "Pruning package: ${NAME}"
+
+      - name: Dry run notice
+        if: inputs.dry-run
+        run: echo "Dry run enabled — no versions will be deleted."
+
+      - name: Delete old versions
+        if: ${{ !inputs.dry-run }}
+        uses: actions/delete-package-versions@v5
+        with:
+          owner: ${{ github.repository_owner }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          package-name: ${{ steps.vars.outputs.package }}
+          package-type: container
+          min-versions-to-keep: ${{ inputs.min-versions-to-keep }}
+          delete-only-untagged-versions: ${{ inputs.delete-only-untagged }}
