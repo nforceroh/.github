@@ -100,8 +100,10 @@ jobs:
 
 ## Renovate preset
 
-`renovate.json` in this repository is a shared preset. Image repos consume it
-with a three line `renovate.json` of their own:
+`default.json` in this repository is a shared preset — Renovate only looks for
+`default.json` when a preset name is omitted, and `renovate.json` is deprecated
+as a preset filename. Image repos consume it with a three line `renovate.json`
+of their own:
 
 ```json
 {
