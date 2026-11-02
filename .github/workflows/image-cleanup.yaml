@@ -8,6 +8,8 @@ name: image-cleanup
 #     prune:
 #       uses: nforceroh/.github/.github/workflows/image-cleanup.yaml@v1
 #       permissions: { contents: read, packages: write }
+#       with:
+#         dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
 
 on:
   workflow_call:
@@ -18,17 +20,17 @@ on:
         required: false
         default: ""
       min-versions-to-keep:
-        description: Number of most recent versions to retain.
+        description: Number of most recent untagged versions to retain.
         type: number
         required: false
-        default: 10
+        default: 5
       delete-only-untagged:
-        description: Only delete untagged versions.
+        description: Only ever delete untagged versions.
         type: boolean
         required: false
         default: true
       dry-run:
-        description: Log what would be deleted without deleting anything.
+        description: List what would be deleted without deleting anything.
         type: boolean
         required: false
         default: false
@@ -44,26 +46,87 @@ jobs:
       packages: write
 
     steps:
-      - name: Resolve package name
-        id: vars
+      - name: Prune versions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          INPUT_IMAGE_NAME: ${{ inputs.image-name }}
+          KEEP: ${{ inputs.min-versions-to-keep }}
+          UNTAGGED_ONLY: ${{ inputs.delete-only-untagged }}
+          DRY_RUN: ${{ inputs.dry-run }}
         run: |
           set -euo pipefail
-          NAME="${{ inputs.image-name }}"
-          if [ -z "$NAME" ]; then NAME="${GITHUB_REPOSITORY##*/}"; fi
-          echo "package=${NAME}" >> "$GITHUB_OUTPUT"
-          echo "Pruning package: ${NAME}"
 
-      - name: Dry run notice
-        if: inputs.dry-run
-        run: echo "Dry run enabled — no versions will be deleted."
+          NAME="${INPUT_IMAGE_NAME}"
+          if [ -z "${NAME}" ]; then NAME="${GITHUB_REPOSITORY##*/}"; fi
+          echo "Pruning ${OWNER}/${NAME}"
 
-      - name: Delete old versions
-        if: ${{ !inputs.dry-run }}
-        uses: actions/delete-package-versions@v5
-        with:
-          owner: ${{ github.repository_owner }}
-          token: ${{ secrets.GITHUB_TOKEN }}
-          package-name: ${{ steps.vars.outputs.package }}
-          package-type: container
-          min-versions-to-keep: ${{ inputs.min-versions-to-keep }}
-          delete-only-untagged-versions: ${{ inputs.delete-only-untagged }}
+          # The listing API differs for org-owned and user-owned packages, so
+          # probe both. pipefail matters: it makes a 404 fall through instead
+          # of being masked by jq succeeding on the error output.
+          VERSIONS="$(mktemp)"
+          endpoint=""
+          for scope in orgs users; do
+            candidate="/${scope}/${OWNER}/packages/container/${NAME}/versions"
+            if gh api --paginate "${candidate}?per_page=100" 2>/dev/null \
+                 | jq -s 'add // []' > "${VERSIONS}"; then
+              endpoint="${candidate}"
+              break
+            fi
+          done
+
+          if [ -z "${endpoint}" ]; then
+            echo "::error::Could not list package versions for ${OWNER}/${NAME}"
+            exit 1
+          fi
+
+          total="$(jq 'length' "${VERSIONS}")"
+          echo "Found ${total} versions via ${endpoint}"
+
+          if [ "${UNTAGGED_ONLY}" = "true" ]; then
+            filter='select(((.metadata.container.tags // []) | length) == 0)'
+          else
+            filter='.'
+          fi
+
+          # Newest first, drop the N most recent, delete the remainder.
+          mapfile -t delete_ids < <(
+            jq -r --argjson keep "${KEEP}" \
+              "[ .[] | ${filter} ] | sort_by(.created_at) | reverse | .[\$keep:] | .[].id" \
+              "${VERSIONS}"
+          )
+
+          if [ "${#delete_ids[@]}" -eq 0 ]; then
+            echo "Nothing to delete; keeping the newest ${KEEP}."
+            exit 0
+          fi
+
+          echo "Keeping the newest ${KEEP}; ${#delete_ids[@]} candidate(s) for deletion."
+          {
+            echo "### ${OWNER}/${NAME}"
+            echo
+            echo "- versions found: ${total}"
+            echo "- kept: ${KEEP}"
+            echo "- candidates: ${#delete_ids[@]}"
+            echo "- mode: $([ "${DRY_RUN}" = "true" ] && echo 'dry run (nothing deleted)' || echo 'delete')"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${DRY_RUN}" = "true" ]; then
+            printf 'would delete id %s\n' "${delete_ids[@]}"
+            exit 0
+          fi
+
+          failed=0
+          for id in "${delete_ids[@]}"; do
+            if gh api --method DELETE "${endpoint}/${id}" >/dev/null 2>&1; then
+              echo "deleted ${id}"
+            else
+              echo "::warning::Failed to delete version ${id}"
+              failed=$((failed + 1))
+            fi
+          done
+
+          if [ "${failed}" -gt 0 ]; then
+            echo "::error::${failed} version(s) could not be deleted"
+            exit 1
+          fi

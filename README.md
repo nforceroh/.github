@@ -54,9 +54,14 @@ Prunes old GHCR versions.
 | input | default | purpose |
 | --- | --- | --- |
 | `image-name` | calling repo name | GHCR package to prune |
-| `min-versions-to-keep` | `10` | versions retained |
-| `delete-only-untagged` | `true` | skip tagged versions |
-| `dry-run` | `false` | report without deleting |
+| `min-versions-to-keep` | `5` | most recent untagged versions retained |
+| `delete-only-untagged` | `true` | never delete a tagged version |
+| `dry-run` | `false` | list what would be deleted without deleting |
+
+Listing a package's versions needs a different endpoint for org-owned and
+user-owned packages, so the workflow probes both. Deletions are paginated via
+`gh api`, and a failed delete is reported as a warning and counted rather than
+silently ignored.
 
 ## Usage
 
