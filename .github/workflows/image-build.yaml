@@ -153,10 +153,19 @@ jobs:
           BASE_REF="$(awk 'tolower($1)=="from"{print $2; exit}' "${INPUT_DOCKERFILE}")"
           BASE_DIGEST="unknown"
           if [ -n "${BASE_REF}" ]; then
-            if RESOLVED="$(docker buildx imagetools inspect "${BASE_REF}" 2>/dev/null                             | awk '/^Digest:/{print $2; exit}')" && [ -n "${RESOLVED}" ]; then
+            # Preferred: buildx prints just the digest. Fall back to parsing the
+            # human-readable form, whose key padding varies between versions.
+            if RESOLVED="$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "${BASE_REF}" 2>/dev/null)" \
+               && [ -n "${RESOLVED}" ]; then
+              BASE_DIGEST="${RESOLVED}"
+            elif RESOLVED="$(docker buildx imagetools inspect "${BASE_REF}" 2>&1 \
+                              | awk -F': *' 'tolower($1)=="digest"{print $2; exit}')" \
+                 && [ -n "${RESOLVED}" ]; then
               BASE_DIGEST="${RESOLVED}"
             else
-              echo "::warning::Could not resolve a digest for ${BASE_REF}; using 'unknown'"
+              # Non-fatal: only the digest-suffixed tag depends on this.
+              echo "::warning::Could not resolve a digest for ${BASE_REF}; continuing without it"
+              docker buildx imagetools inspect "${BASE_REF}" 2>&1 | sed 's/^/  /' || true
             fi
           fi
 
@@ -170,6 +179,11 @@ jobs:
               printf '%s\n' "${INPUT_EXTRA_BUILD_ARGS}"
             fi
             echo "IMAGE_BUILD_ARGS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "base_ref=${BASE_REF}"
+            echo "base_digest=${BASE_DIGEST}"
           } >> "$GITHUB_OUTPUT"
 
           echo "Base ${BASE_REF:-<none>} -> ${BASE_DIGEST}"
@@ -194,8 +208,9 @@ jobs:
         id: extra
         env:
           INPUT_EXTRA_TAGS: ${{ inputs.extra-tags }}
-          INPUT_DOCKERFILE: ${{ inputs.dockerfile }}
           INPUT_PUBLISH_BASE_DIGEST: ${{ inputs.publish-base-digest }}
+          INPUT_BASE_REF: ${{ steps.args.outputs.base_ref }}
+          INPUT_BASE_DIGEST: ${{ steps.args.outputs.base_digest }}
         run: |
           set -euo pipefail
           OUT="$(mktemp)"
@@ -209,22 +224,21 @@ jobs:
           fi
 
           if [ "${INPUT_PUBLISH_BASE_DIGEST}" = "true" ]; then
-            BASE_REF="$(awk 'tolower($1)=="from"{print $2; exit}' "${INPUT_DOCKERFILE}")"
-            if [ -z "${BASE_REF}" ]; then
-              echo "::error::Could not read a FROM line from ${INPUT_DOCKERFILE}"
-              exit 1
+            # Reuse the digest the build-args step already resolved rather than
+            # calling imagetools again — it needs the registry, and a failure
+            # here must not abort the build.
+            BASE_REF="${INPUT_BASE_REF}"
+            DIGEST="${INPUT_BASE_DIGEST}"
+            if [ -z "${BASE_REF}" ] || [ "${DIGEST}" = "unknown" ] || [ -z "${DIGEST}" ]; then
+              echo "::warning::No base digest available for '${BASE_REF:-<none>}'; skipping the digest-suffixed tag"
+            else
+              BASE_TAG="${BASE_REF##*:}"
+              case "${BASE_TAG}" in */*) BASE_TAG="${BASE_REF##*/}" ;; esac
+              SHORT="${DIGEST#sha256:}"
+              SHORT="${SHORT:0:12}"
+              printf 'type=raw,value=%s-%s\n' "${BASE_TAG}" "${SHORT}" >> "$OUT"
+              echo "Base ${BASE_REF} resolves to ${DIGEST}"
             fi
-            BASE_TAG="${BASE_REF##*:}"
-            case "${BASE_TAG}" in */*) BASE_TAG="${BASE_REF##*/}" ;; esac
-            DIGEST="$(docker buildx imagetools inspect "${BASE_REF}" | awk '/^Digest:/{print $2; exit}')"
-            if [ -z "${DIGEST}" ]; then
-              echo "::error::Could not resolve digest for ${BASE_REF}"
-              exit 1
-            fi
-            SHORT="${DIGEST#sha256:}"
-            SHORT="${SHORT:0:12}"
-            printf 'type=raw,value=%s-%s\n' "${BASE_TAG}" "${SHORT}" >> "$OUT"
-            echo "Base ${BASE_REF} resolves to ${DIGEST}"
           fi
 
           {
