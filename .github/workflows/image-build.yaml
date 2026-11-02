@@ -57,6 +57,13 @@ on:
         type: string
         required: false
         default: ""
+      extra-build-args:
+        description: >
+          Newline separated extra build args, one KEY=value per line. The
+          shared BUILD_DATE and VERSION are always supplied.
+        type: string
+        required: false
+        default: ""
       publish-base-digest:
         description: >
           Also tag the image with "<base-tag>-<base-digest>" resolved from the
@@ -88,24 +95,30 @@ jobs:
 
       - name: Resolve image metadata
         id: vars
+        env:
+          INPUT_IMAGE_NAME: ${{ inputs.image-name }}
+          INPUT_REGISTRY: ${{ inputs.registry }}
+          INPUT_REGISTRY_OWNER: ${{ inputs.registry-owner }}
+          INPUT_EXTRA_BUILD_ARGS: ${{ inputs.extra-build-args }}
         run: |
           set -euo pipefail
 
-          NAME="${{ inputs.image-name }}"
-          if [ -z "$NAME" ]; then NAME="${GITHUB_REPOSITORY##*/}"; fi
+          NAME="${INPUT_IMAGE_NAME}"
+          if [ -z "${NAME}" ]; then NAME="${GITHUB_REPOSITORY##*/}"; fi
 
-          OWNER="${{ inputs.registry-owner }}"
-          if [ -z "$OWNER" ]; then OWNER="${GITHUB_REPOSITORY_OWNER}"; fi
+          OWNER="${INPUT_REGISTRY_OWNER}"
+          if [ -z "${OWNER}" ]; then OWNER="${GITHUB_REPOSITORY_OWNER}"; fi
 
           BUILD_DATE="$(date -u +'%Y%m%d%H%M%S')"
+          BASE="${INPUT_REGISTRY}/${OWNER}/${NAME}"
 
           {
             echo "name=${NAME}"
-            echo "base=${{ inputs.registry }}/${OWNER}/${NAME}"
+            echo "base=${BASE}"
             echo "build_date=${BUILD_DATE}"
           } >> "$GITHUB_OUTPUT"
 
-          echo "Resolved image: ${{ inputs.registry }}/${OWNER}/${NAME}"
+          echo "Resolved image: ${BASE}"
 
       - name: Set up QEMU
         if: contains(inputs.platforms, ',')
@@ -113,6 +126,42 @@ jobs:
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v4
+
+      - name: Resolve build args
+        id: args
+        env:
+          INPUT_DOCKERFILE: ${{ inputs.dockerfile }}
+          INPUT_EXTRA_BUILD_ARGS: ${{ inputs.extra-build-args }}
+        run: |
+          set -euo pipefail
+
+          # A Dockerfile that declares BUILD_DATE/VERSION with an "unknown"
+          # default otherwise resolves to that default and the published image
+          # loses its metadata. Supply them, plus VCS_REF and the digest of the
+          # base image the Dockerfile builds from.
+          BASE_REF="$(awk 'tolower($1)=="from"{print $2; exit}' "${INPUT_DOCKERFILE}")"
+          BASE_DIGEST="unknown"
+          if [ -n "${BASE_REF}" ]; then
+            if RESOLVED="$(docker buildx imagetools inspect "${BASE_REF}" 2>/dev/null                             | awk '/^Digest:/{print $2; exit}')" && [ -n "${RESOLVED}" ]; then
+              BASE_DIGEST="${RESOLVED}"
+            else
+              echo "::warning::Could not resolve a digest for ${BASE_REF}; using 'unknown'"
+            fi
+          fi
+
+          {
+            echo "build_args<<IMAGE_BUILD_ARGS_EOF"
+            printf 'BUILD_DATE=%s\n' "${{ steps.vars.outputs.build_date }}"
+            printf 'VERSION=%s\n' "${{ steps.vars.outputs.build_date }}"
+            printf 'VCS_REF=%s\n' "${GITHUB_SHA}"
+            printf 'BASE_DIGEST=%s\n' "${BASE_DIGEST}"
+            if [ -n "${INPUT_EXTRA_BUILD_ARGS}" ]; then
+              printf '%s\n' "${INPUT_EXTRA_BUILD_ARGS}"
+            fi
+            echo "IMAGE_BUILD_ARGS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Base ${BASE_REF:-<none>} -> ${BASE_DIGEST}"
 
       - name: Log in to ${{ inputs.registry }}
         # Needed before the test build when FROM references a moving tag such as
@@ -132,9 +181,7 @@ jobs:
           load: true
           push: false
           tags: local/${{ steps.vars.outputs.name }}:ci
-          build-args: |
-            BUILD_DATE=${{ steps.vars.outputs.build_date }}
-            VERSION=${{ steps.vars.outputs.build_date }}
+          build-args: ${{ steps.args.outputs.build_args }}
 
       - name: Smoke test
         if: inputs.test-command != ''
@@ -144,22 +191,26 @@ jobs:
 
       - name: Resolve extra tags
         id: extra
+        env:
+          INPUT_EXTRA_TAGS: ${{ inputs.extra-tags }}
+          INPUT_DOCKERFILE: ${{ inputs.dockerfile }}
+          INPUT_PUBLISH_BASE_DIGEST: ${{ inputs.publish-base-digest }}
         run: |
           set -euo pipefail
           OUT="$(mktemp)"
 
-          if [ -n "${{ inputs.extra-tags }}" ]; then
-            IFS=',' read -ra PARTS <<< "${{ inputs.extra-tags }}"
+          if [ -n "${INPUT_EXTRA_TAGS}" ]; then
+            IFS=',' read -ra PARTS <<< "${INPUT_EXTRA_TAGS}"
             for TAG in "${PARTS[@]}"; do
               TAG="$(echo "$TAG" | xargs)"
               if [ -n "$TAG" ]; then printf 'type=raw,value=%s\n' "$TAG" >> "$OUT"; fi
             done
           fi
 
-          if [ "${{ inputs.publish-base-digest }}" = "true" ]; then
-            BASE_REF="$(awk 'tolower($1)=="from"{print $2; exit}' '${{ inputs.dockerfile }}')"
+          if [ "${INPUT_PUBLISH_BASE_DIGEST}" = "true" ]; then
+            BASE_REF="$(awk 'tolower($1)=="from"{print $2; exit}' "${INPUT_DOCKERFILE}")"
             if [ -z "${BASE_REF}" ]; then
-              echo "::error::Could not read a FROM line from ${{ inputs.dockerfile }}"
+              echo "::error::Could not read a FROM line from ${INPUT_DOCKERFILE}"
               exit 1
             fi
             BASE_TAG="${BASE_REF##*:}"
@@ -208,9 +259,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            BUILD_DATE=${{ steps.vars.outputs.build_date }}
-            VERSION=${{ steps.vars.outputs.build_date }}
+          build-args: ${{ steps.args.outputs.build_args }}
 
       - name: Attest build provenance
         if: inputs.provenance && github.event_name != 'pull_request'

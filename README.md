@@ -18,18 +18,28 @@ Builds, smoke tests and publishes an image to GHCR.
 | `context` | `.` | build context |
 | `dockerfile` | `Dockerfile` | Dockerfile path |
 | `test-command` | `./tests/run_tests.sh "$IMAGE"` | post-build smoke test; `$IMAGE` holds the locally built reference; empty string skips |
+| `extra-build-args` | *(empty)* | newline separated extra build args, one `KEY=value` per line |
+| `extra-tags` | *(empty)* | comma separated literal tags to publish in addition to the defaults |
+| `publish-base-digest` | `false` | also tag with `<base-tag>-<base-digest>`, resolved from the Dockerfile's first `FROM` |
 | `platforms` | `linux/amd64` | target platforms |
 | `registry` | `ghcr.io` | registry host |
 | `registry-owner` | calling repo owner | registry namespace |
-| `extra-tags` | *(empty)* | newline separated additional tags |
 | `provenance` | `true` | emit a build provenance attestation |
 
 Published tags: `sha-<short>`, `<build date>`, `latest` on `main` and `v*`
 tags, plus `branch` and any semver tags when the ref is a version tag.
 
-Because Git tags and `latest` would otherwise let two builds share a tag, the
-caller is responsible for pinning `imagePullPolicy` downstream if it cares
-about immutability.
+`BUILD_DATE`, `VERSION` (both the build date), `VCS_REF` (the commit SHA) and
+`BASE_DIGEST` (resolved from the Dockerfile's first `FROM`) are always passed
+as build args. A Dockerfile that declares these `ARG`s with an `unknown`
+default would otherwise publish an image whose labels all read `unknown`.
+
+Unpinned `latest` and `branch` tags mean two builds can share a tag; pin by
+digest downstream if that matters.
+
+The `test-command` input is the only place caller input is interpolated into a
+shell, which is intentional — it is code the caller is declaring, same as
+`runs-on` or `script`. Every other input reaches the shell through `env`.
 
 ### `image-cleanup.yaml`
 
