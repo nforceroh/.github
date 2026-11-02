@@ -17,6 +17,7 @@ Builds, smoke tests and publishes an image to GHCR.
 | `image-name` | calling repo name | published image name |
 | `context` | `.` | build context |
 | `dockerfile` | `Dockerfile` | Dockerfile path |
+| `setup-test-command` | *(empty)* | command run on the runner before the smoke test, for suites needing host-side tooling (e.g. `pip install -r requirements.txt`); empty string skips |
 | `test-command` | `./tests/run_tests.sh "$IMAGE"` | post-build smoke test; `$IMAGE` holds the locally built reference; empty string skips |
 | `extra-build-args` | *(empty)* | newline separated extra build args, one `KEY=value` per line |
 | `extra-tags` | *(empty)* | comma separated literal tags to publish in addition to the defaults |
@@ -43,9 +44,10 @@ builds (a warning, not a failure) and a real digest on every other event.
 Unpinned `latest` and `branch` tags mean two builds can share a tag; pin by
 digest downstream if that matters.
 
-The `test-command` input is the only place caller input is interpolated into a
-shell, which is intentional — it is code the caller is declaring, same as
-`runs-on` or `script`. Every other input reaches the shell through `env`.
+The `setup-test-command` and `test-command` inputs are the only places caller
+input is interpolated into a shell, which is intentional — they are code the
+caller is declaring, same as `runs-on` or `script`. Every other input reaches
+the shell through `env`.
 
 ### `image-cleanup.yaml`
 

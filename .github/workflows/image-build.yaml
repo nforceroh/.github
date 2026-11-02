@@ -30,6 +30,14 @@ on:
         type: string
         required: false
         default: "Dockerfile"
+      setup-test-command:
+        description: >
+          Command run on the runner before the smoke test, for suites that need
+          host-side tooling (e.g. installing Python dependencies). Set to empty
+          to skip.
+        type: string
+        required: false
+        default: ""
       test-command:
         description: >
           Command run after a local build to smoke test the image. Receives the
@@ -197,6 +205,10 @@ jobs:
           push: false
           tags: local/${{ steps.vars.outputs.name }}:ci
           build-args: ${{ steps.args.outputs.build_args }}
+
+      - name: Set up test environment
+        if: inputs.setup-test-command != ''
+        run: ${{ inputs.setup-test-command }}
 
       - name: Smoke test
         if: inputs.test-command != ''
