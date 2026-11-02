@@ -34,6 +34,12 @@ tags, plus `branch` and any semver tags when the ref is a version tag.
 as build args. A Dockerfile that declares these `ARG`s with an `unknown`
 default would otherwise publish an image whose labels all read `unknown`.
 
+The registry login runs before the digest lookup and before the test build,
+because both may need to pull from the registry. Digest lookup stays anonymous
+on a `pull_request` event, where logging in is not appropriate — so a
+Dockerfile whose base image is private will get `BASE_DIGEST=unknown` on PR
+builds (a warning, not a failure) and a real digest on every other event.
+
 Unpinned `latest` and `branch` tags mean two builds can share a tag; pin by
 digest downstream if that matters.
 
